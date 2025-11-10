@@ -1,6 +1,6 @@
 from context import Context, llm, tools, logger
 from langchain.agents import create_agent
-from langchain_core.messages import SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage
 
 
 # ---------- NODES ---------- #
@@ -337,7 +337,7 @@ def toolNode(cxt: Context):
     
     # Run with the system message
     result = agent_executor.invoke({
-        "messages": [SystemMessage(content=system_message)]
+        "messages": [HumanMessage(content=system_message)]
     })
     
     # Get the final AI message
