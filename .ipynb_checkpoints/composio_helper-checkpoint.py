@@ -1,3 +1,4 @@
+# composio_helper.py
 from typing import Any, Dict
 import logging
 import os
@@ -10,22 +11,27 @@ from composio_client.types.tool_router_create_session_params import ConfigToolki
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- COMPOSIO HELPER FUNCTIONS ----------
 def _extract_client_config(server: Any) -> Dict[str, Any]:
     """
     Normalise the server response to the config shape expected by MultiServerMCPClient.
+    Returns: {"url": "...", "transport": "..."}
     """
-    # Collect possible dictionary representations from the server object.
     candidate_maps = []
     transport_fallback = "streamable_http"
+
+    # Direct attributes
     if hasattr(server, "mcp_url"):
         return {"url": getattr(server, "mcp_url"), "transport": transport_fallback}
     if hasattr(server, "client_config") and getattr(server, "client_config"):
         return getattr(server, "client_config")
+
+    # Pydantic / dataclass helpers
     if hasattr(server, "model_dump"):
         candidate_maps.append(server.model_dump())
     if hasattr(server, "dict"):
         candidate_maps.append(server.dict())
+
+    # Generic dict-ish
     if isinstance(server, dict):
         candidate_maps.append(server)
     if hasattr(server, "__dict__"):
@@ -34,13 +40,15 @@ def _extract_client_config(server: Any) -> Dict[str, Any]:
     for data in candidate_maps:
         if not isinstance(data, dict):
             continue
+        # Nested client_config
         for key in ("client_config", "clientConfig"):
             value = data.get(key)
             if isinstance(value, dict):
                 return value
-        # Some responses already match the expected schema (url + transport).
+        # Already normalized
         if {"url", "transport"} <= data.keys():
             return data
+        # Alt field
         if "mcp_url" in data:
             transport = data.get("type") or transport_fallback
             return {"url": data["mcp_url"], "transport": transport}
@@ -60,10 +68,30 @@ def _find_existing_server(composio_client: Composio, server_name: str):
     return None
 
 def initialize_composio_mcp():
+    """
+    Creates or reuses an MCP server with the Notion toolkit and returns the client config.
+    Requires:
+      - COMPOSIO_API_KEY
+      - NOTION auth config id (either hard-coded below or COMPOSIO_NOTION_AUTH_CONFIG in env)
+    """
     logger.info("Preparing Composio MCP client setup")
-    composio_client = Composio(api_key=os.environ["COMPOSIO_API_KEY"])
+    api_key = os.environ.get("COMPOSIO_API_KEY")
+    if not api_key:
+        raise RuntimeError("COMPOSIO_API_KEY is missing. Add it to .env.local")
 
-    server_name = "mcp-config-73840"
+    notion_auth_config = (
+        os.environ.get("COMPOSIO_NOTION_AUTH_CONFIG")  # preferred path: set this in env
+        or "ac_REPLACE_WITH_YOUR_NOTION_AUTH_CONFIG_ID"  # fallback (must be replaced)
+    )
+    if notion_auth_config.startswith("ac_REPLACE_"):
+        raise RuntimeError(
+            "You must set COMPOSIO_NOTION_AUTH_CONFIG in your environment "
+            "to the Notion Auth Config ID (starts with 'ac_...')."
+        )
+
+    composio_client = Composio(api_key=api_key)
+
+    server_name = "mcp-config-notion"  # descriptive name for this router
     logger.debug("Using Composio server name %s", server_name)
 
     created_new = True
@@ -73,8 +101,8 @@ def initialize_composio_mcp():
             name=server_name,
             toolkits=[
                 ConfigToolkit(**{
-                    "toolkit": "googlecalendar",
-                    "auth_config": "ac_FKnlhoa1rCHO",
+                    "toolkit": "notion",
+                    "auth_config": notion_auth_config,
                 })
             ]
         )
@@ -112,6 +140,3 @@ def initialize_composio_mcp():
         client_config.get("transport"),
     )
     return client_config
-
-    # mcp_client = MultiServerMCPClient({"google_calendar": client_config})
-    # mcp_tools = asyncio.run(mcp_client.get_tools())
