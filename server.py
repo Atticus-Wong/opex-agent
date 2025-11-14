@@ -1,9 +1,24 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from agent import build_agent
 
+origins = [
+    "http://localhost:3000",  # Example: your React app running on localhost
+    "https://yourfrontenddomain.com", # Example: your deployed frontend
+    # Add more origins as needed
+]
+
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # List of allowed origins
+    allow_credentials=True, # Allow cookies, authorization headers, etc.
+    allow_methods=["*"],    # Allow all HTTP methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],    # Allow all headers
+
+)
 agent = build_agent()  # compile graph once per
 
 
