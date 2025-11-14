@@ -1,10 +1,23 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from ws_manager import manager
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from agent import build_agent
 
 app = FastAPI()
+
+# Allow your Next.js dev server to talk to FastAPI
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # frontend origin
+    allow_credentials=True,
+    allow_methods=["*"],   # or ["POST"] if you want to be strict
+    allow_headers=["*"],
+)
+
 agent = build_agent()  # compile graph once per
+
 
 
 def serialize_message_content(message) -> str:
@@ -65,3 +78,15 @@ async def run_workflow(body: RunRequest):
         diagram=result.get("diagram"),
         messages=[serialize_message_content(msg) for msg in result["messages"]],
     )
+
+@app.websocket("/ws/{chat_session_id}")
+async def websocket_endpoint(websocket: WebSocket, chat_session_id: str):
+    await manager.connect(chat_session_id, websocket)
+    print("connection open")
+    try:
+        # just keep the socket alive; you don't *need* to receive anything
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        print("connection closed")
+        manager.disconnect(chat_session_id, websocket)

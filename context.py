@@ -26,3 +26,4 @@ class Context(MessagesState):
     diagram: str 
     document: str 
     is_satisfied: bool
+    chat_session_id: str

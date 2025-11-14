@@ -10,23 +10,43 @@ from nodes import (
     toolNode,
 )
 from context import Context
+from ws_manager import manager
+import asyncio
+
+def wrap_node(fn, step_label: str):
+    async def wrapped(ctx: Context):
+        # get session id from state
+        chat_session_id = ctx.get("chat_session_id")
+
+        if chat_session_id:
+            # send status over websocket
+            await manager.send_status(chat_session_id, step_label)
+
+        # call the original (sync) node
+        # it's fine to call a sync function from an async one
+        return fn(ctx)
+
+    return wrapped
+
 
 
 def build_agent():
-    """
-    Build and compile the LangGraph agent used by the FastAPI server.
-
-    Returns:
-        The compiled LangGraph workflow ready to be invoked.
-    """
     graph = StateGraph(Context)
-    graph.add_node("intentParser", intentParserNode)
-    graph.add_node("generateProcessDiagram", generateProcessDiagramNode)
-    graph.add_node("generateDocument", generateDocumentNode)
-    graph.add_node("validation", validationNode)
-    graph.add_node("processIteration", processIterationNode)
-    graph.add_node("docIteration", docIterationNode)
-    graph.add_node("tools", toolNode)
+
+    graph.add_node("intentParser",
+                   wrap_node(intentParserNode, "Gathering user intent"))
+    graph.add_node("generateProcessDiagram",
+                   wrap_node(generateProcessDiagramNode, "Generating process diagram"))
+    graph.add_node("generateDocument",
+                   wrap_node(generateDocumentNode, "Drafting process document"))
+    graph.add_node("validation",
+                   wrap_node(validationNode, "Validating workflow"))
+    graph.add_node("processIteration",
+                   wrap_node(processIterationNode, "Refining diagram"))
+    graph.add_node("docIteration",
+                   wrap_node(docIterationNode, "Refining document"))
+    graph.add_node("tools",
+                   wrap_node(toolNode, "Sending final outputs"))
 
     graph.add_edge(START, "intentParser")
     graph.add_edge("intentParser", "generateProcessDiagram")
@@ -39,10 +59,7 @@ def build_agent():
     graph.add_conditional_edges(
         "validation",
         should_iterate,
-        {
-            "tools": "tools",
-            "docIteration": "docIteration",
-        },
+        {"tools": "tools", "docIteration": "docIteration"},
     )
 
     graph.add_edge("docIteration", "processIteration")
