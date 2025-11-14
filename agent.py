@@ -9,10 +9,11 @@ from nodes import (
     docIterationNode,
     toolNode,
 )
-from context import Context
+from context import Context, checkpointer
 
 
-def build_agent():
+
+def build_agent(checkpointer):
     """
     Build and compile the LangGraph agent used by the FastAPI server.
 
@@ -49,10 +50,11 @@ def build_agent():
     graph.add_edge("processIteration", "validation")
     graph.add_edge("tools", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
+
+agent = build_agent(checkpointer)
 
 if __name__ == "__main__":
-    agent = build_agent()
     result = agent.invoke(
         {
             "messages": [
