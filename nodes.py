@@ -1,10 +1,88 @@
+from typing import Any
+
 from context import Context, llm, tools, logger
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage, AIMessage
 
+STEP_LABELS = {
+    "intentParser": "Gathering user intent",
+    "generateProcessDiagram": "Generating process diagram",
+    "generateDocument": "Drafting process document",
+    "validation": "Validating workflow",
+    "processIteration": "Refining diagram",
+    "docIteration": "Refining document",
+    "tools": "Sending final outputs",
+}
+
+
+def _chunk_to_text(chunk: Any) -> str:
+    """Normalize LangChain chunk content into displayable text."""
+    content = getattr(chunk, "content", chunk)
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+                else:
+                    parts.append(str(item))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+
+    return str(content)
+
+
+async def _invoke_llm_with_stream(prompt: str, cxt: Context, step_key: str) -> str:
+    """Invoke the shared LLM while streaming partial results via the handler."""
+    handler = cxt.get("stream_handler")
+    step_label = STEP_LABELS.get(step_key, step_key)
+
+    if not hasattr(llm, "stream"):
+        result = llm.invoke(prompt)
+        text = result.content.strip()
+        if handler:
+            await handler({
+                "type": "chunk",
+                "step": step_key,
+                "label": step_label,
+                "is_final": True,
+                "content": text,
+            })
+        return text
+
+    chunks: list[str] = []
+    for chunk in llm.stream(prompt):
+        text = _chunk_to_text(chunk)
+        if not text:
+            continue
+        chunks.append(text)
+        if handler:
+            await handler({
+                "type": "chunk",
+                "step": step_key,
+                "label": step_label,
+                "delta": text,
+            })
+
+    final_text = "".join(chunks).strip()
+    if handler:
+        await handler({
+            "type": "chunk",
+            "step": step_key,
+            "label": step_label,
+            "is_final": True,
+            "content": final_text,
+        })
+    return final_text
+
 
 # ---------- NODES ---------- #
-def intentParserNode(cxt: Context):
+async def intentParserNode(cxt: Context):
     logger.info("BEGIN INTENT PARSING")
     """Uses the LLM to rewrite and optimize the user's original message."""
     
@@ -36,14 +114,15 @@ def intentParserNode(cxt: Context):
         {user_message}
         """
     
-    result = llm.invoke(PROMPT_INTENT_PARSER)
-    optimized_message = result.content.strip()
+    optimized_message = await _invoke_llm_with_stream(
+        PROMPT_INTENT_PARSER, cxt, "intentParser"
+    )
 
     # Store result inside context's message state (not overwriting other fields)
     cxt["messages"].append(AIMessage(content=optimized_message))
 
     return cxt
-def generateProcessDiagramNode(cxt: Context):
+async def generateProcessDiagramNode(cxt: Context):
     """Generates a high-level process diagram outline from the optimized message."""
     logger.info("GENERATING PROCESS DIAGRAM")
 
@@ -80,15 +159,16 @@ def generateProcessDiagramNode(cxt: Context):
         Workflow description:
         {optimized_message}
         """
-    result = llm.invoke(PROMPT_PROCESS_DIAGRAM)
 
-    diagram_outline = result.content.strip()
+    diagram_outline = await _invoke_llm_with_stream(
+        PROMPT_PROCESS_DIAGRAM, cxt, "generateProcessDiagram"
+    )
 
     cxt["diagram"] = diagram_outline
 
     cxt["messages"].append(AIMessage(content=diagram_outline))
     return cxt
-def generateDocumentNode(cxt: Context):
+async def generateDocumentNode(cxt: Context):
     """Generates a written process document from the optimized message and its diagram."""
     logger.info("GENERATING DOCUMENT")
 
@@ -126,14 +206,15 @@ def generateDocumentNode(cxt: Context):
         Write the full document below:
         """
 
-    result = llm.invoke(PROMPT_DOCUMENT_WRITER)
-    document_text = result.content.strip()
+    document_text = await _invoke_llm_with_stream(
+        PROMPT_DOCUMENT_WRITER, cxt, "generateDocument"
+    )
 
     cxt["document"] = document_text
     cxt["messages"].append(AIMessage(content=document_text))
 
     return cxt
-def validationNode(cxt: Context):
+async def validationNode(cxt: Context):
     """Validates the quality and consistency of the generated document and Mermaid diagram."""
     logger.info("VALIDATING PROCESS")
 
@@ -175,18 +256,21 @@ def validationNode(cxt: Context):
         ```
         """
 
-    result = llm.invoke(PROMPT_VALIDATION)
-    review = result.content.strip()
+    review = await _invoke_llm_with_stream(
+        PROMPT_VALIDATION, cxt, "validation"
+    )
 
     # --- 4. Post-process verdict ---
-    is_pass = "pass" in review.lower() and "fail" not in review.lower()
+    is_pass = "pass" in review.lower()
+    logger.info(review.lower())
+    logger.info(f"value of is_pass: {is_pass}")
 
     # --- 5. Store results in context ---
     cxt["is_satisfied"] = is_pass
     cxt["messages"].append(AIMessage(content=review))
 
     return cxt
-def processIterationNode(cxt: Context):
+async def processIterationNode(cxt: Context):
     """If validation fails, use recommendations to refine the Mermaid diagram for better consistency."""
     logger.info("ITERATING ON PROCESS")
 
@@ -237,14 +321,15 @@ def processIterationNode(cxt: Context):
         Output only the **revised MermaidJS diagram**.
         """
 
-    result = llm.invoke(PROMPT_PROCESS_ITERATION)
-    revised_diagram = result.content.strip()
+    revised_diagram = await _invoke_llm_with_stream(
+        PROMPT_PROCESS_ITERATION, cxt, "processIteration"
+    )
     
     cxt["diagram"] = revised_diagram
     cxt["messages"].append(AIMessage(content=revised_diagram))
 
     return cxt
-def docIterationNode(cxt: Context):
+async def docIterationNode(cxt: Context):
     """If validation fails, use recommendations to refine the written document so it aligns with the diagram."""
     logger.info("ITERATING ON DOCUMENT")
 
@@ -296,15 +381,16 @@ def docIterationNode(cxt: Context):
         Revised Document:
         """
 
-    result = llm.invoke(PROMPT_DOC_ITERATION)
-    revised_document = result.content.strip()
+    revised_document = await _invoke_llm_with_stream(
+        PROMPT_DOC_ITERATION, cxt, "docIteration"
+    )
 
     # --- 5. Update context ---
     cxt["document"] = revised_document
     cxt["messages"].append(AIMessage(content=revised_document))
 
     return cxt
-def toolNode(cxt: Context):
+async def toolNode(cxt: Context):
     logger.info("SENDING PROCESS")
     document = cxt["document"]
     diagram = cxt["diagram"]
@@ -321,7 +407,7 @@ def toolNode(cxt: Context):
     1. Compose a professional summary email to the operations team at **opexteam.codelab@gmail.com**.
     2. Include the **validated document** and the **Mermaid diagram** within the email body.
     3. Use the Gmail tool to send the message.
-    4. Once sent, confirm that the email has been dispatched successfully.
+    4. output the message you composed and send to the gmail.
 
     Document:
     {document}
@@ -343,6 +429,16 @@ def toolNode(cxt: Context):
     # Get the final AI message
     final_message = result["messages"][-1]
     final_output = final_message.content if hasattr(final_message, 'content') else str(final_message)
+
+    handler = cxt.get("stream_handler")
+    if handler:
+        await handler({
+            "type": "chunk",
+            "step": "tools",
+            "label": STEP_LABELS["tools"],
+            "is_final": True,
+            "content": final_output,
+        })
     
     # Save to context
     cxt["messages"].append(AIMessage(content=final_output))

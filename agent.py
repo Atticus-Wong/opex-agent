@@ -1,3 +1,5 @@
+import inspect
+
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage
 from nodes import (
@@ -8,23 +10,36 @@ from nodes import (
     processIterationNode,
     docIterationNode,
     toolNode,
+    STEP_LABELS,
 )
 from context import Context
-from ws_manager import manager
-import asyncio
 
-def wrap_node(fn, step_label: str):
+def wrap_node(fn, step_key: str):
     async def wrapped(ctx: Context):
-        # get session id from state
-        chat_session_id = ctx.get("chat_session_id")
+        handler = ctx.get("stream_handler")
+        label = STEP_LABELS.get(step_key, step_key)
 
-        if chat_session_id:
-            # send status over websocket
-            await manager.send_status(chat_session_id, step_label)
+        if handler:
+            await handler({
+                "type": "status",
+                "step": step_key,
+                "label": label,
+                "status": "start",
+            })
 
-        # call the original (sync) node
-        # it's fine to call a sync function from an async one
-        return fn(ctx)
+        result = fn(ctx)
+        if inspect.isawaitable(result):
+            result = await result
+
+        if handler:
+            await handler({
+                "type": "status",
+                "step": step_key,
+                "label": label,
+                "status": "end",
+            })
+
+        return result
 
     return wrapped
 
@@ -33,20 +48,20 @@ def wrap_node(fn, step_label: str):
 def build_agent():
     graph = StateGraph(Context)
 
-    graph.add_node("intentParser",
-                   wrap_node(intentParserNode, "Gathering user intent"))
-    graph.add_node("generateProcessDiagram",
-                   wrap_node(generateProcessDiagramNode, "Generating process diagram"))
-    graph.add_node("generateDocument",
-                   wrap_node(generateDocumentNode, "Drafting process document"))
-    graph.add_node("validation",
-                   wrap_node(validationNode, "Validating workflow"))
-    graph.add_node("processIteration",
-                   wrap_node(processIterationNode, "Refining diagram"))
-    graph.add_node("docIteration",
-                   wrap_node(docIterationNode, "Refining document"))
-    graph.add_node("tools",
-                   wrap_node(toolNode, "Sending final outputs"))
+    graph.add_node("intentParser", wrap_node(intentParserNode, "intentParser"))
+    graph.add_node(
+        "generateProcessDiagram",
+        wrap_node(generateProcessDiagramNode, "generateProcessDiagram"),
+    )
+    graph.add_node(
+        "generateDocument", wrap_node(generateDocumentNode, "generateDocument")
+    )
+    graph.add_node("validation", wrap_node(validationNode, "validation"))
+    graph.add_node(
+        "processIteration", wrap_node(processIterationNode, "processIteration")
+    )
+    graph.add_node("docIteration", wrap_node(docIterationNode, "docIteration"))
+    graph.add_node("tools", wrap_node(toolNode, "tools"))
 
     graph.add_edge(START, "intentParser")
     graph.add_edge("intentParser", "generateProcessDiagram")

@@ -1,6 +1,11 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import asyncio
+import json
+from contextlib import suppress
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from ws_manager import manager
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from agent import build_agent
@@ -79,14 +84,63 @@ async def run_workflow(body: RunRequest):
         messages=[serialize_message_content(msg) for msg in result["messages"]],
     )
 
-@app.websocket("/ws/{chat_session_id}")
-async def websocket_endpoint(websocket: WebSocket, chat_session_id: str):
-    await manager.connect(chat_session_id, websocket)
-    print("connection open")
+async def _sse_event_stream(body: RunRequest):
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def handler(payload: dict[str, Any]):
+        await queue.put(f"data: {json.dumps(payload)}\n\n")
+
+    async def invoke_agent():
+        try:
+            result = await agent.ainvoke(
+                {
+                    "messages": [HumanMessage(content=body.prompt)],
+                    "chat_session_id": body.chat_session_id,
+                    "stream_handler": handler,
+                }
+            )
+
+            session_id: str = result.get("chat_session_id") or body.chat_session_id
+            summary = {
+                "type": "result",
+                "chat_session_id": session_id,
+                "document": result.get("document"),
+                "diagram": result.get("diagram"),
+                "messages": [
+                    serialize_message_content(msg) for msg in result["messages"]
+                ],
+            }
+            await queue.put(f"data: {json.dumps(summary)}\n\n")
+        except Exception as exc:  # noqa: BLE001 - surface agent errors to client
+            error_payload = {"type": "error", "message": str(exc)}
+            await queue.put(f"data: {json.dumps(error_payload)}\n\n")
+        finally:
+            await queue.put("data: [DONE]\n\n")
+            await queue.put(None)
+
+    task = asyncio.create_task(invoke_agent())
+
     try:
-        # just keep the socket alive; you don't *need* to receive anything
         while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        print("connection closed")
-        manager.disconnect(chat_session_id, websocket)
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
+@app.post("/chat")
+async def chat_stream(body: RunRequest):
+    response = StreamingResponse(
+        _sse_event_stream(body), 
+        media_type="text/event-stream"
+    )
+    # Crucial headers to disable buffering
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no" # For Nginx
+    response.headers["Connection"] = "keep-alive"
+    return response
