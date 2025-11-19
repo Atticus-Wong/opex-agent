@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from agent import build_agent
+from nodes import STEP_LABELS
 
 app = FastAPI()
 
@@ -85,52 +86,93 @@ async def run_workflow(body: RunRequest):
     )
 
 async def _sse_event_stream(body: RunRequest):
-    queue: asyncio.Queue[str] = asyncio.Queue()
+    try:
+        final_state = None
+        
+        # We iterate directly over the agent's stream
+        async for event in agent.astream_events(
+            {
+                "messages": [HumanMessage(content=body.prompt)],
+                "chat_session_id": body.chat_session_id,
+            },
+            stream_mode="messages",
+            version="v1",
+        ):
+            event_type = event.get("event")
+            payload = None
 
-    async def handler(payload: dict[str, Any]):
-        await queue.put(f"data: {json.dumps(payload)}\n\n")
+            # --- Logic to format your events ---
+            if event_type == "on_node_start":
+                step = event.get("name")
+                if step:
+                    payload = {
+                        "type": "status",
+                        "step": step,
+                        "label": STEP_LABELS.get(step, step),
+                        "status": "start",
+                    }
 
-    async def invoke_agent():
-        try:
-            result = await agent.ainvoke(
-                {
-                    "messages": [HumanMessage(content=body.prompt)],
-                    "chat_session_id": body.chat_session_id,
-                    "stream_handler": handler,
-                }
-            )
+            elif event_type == "on_node_end":
+                step = event.get("name")
+                if step:
+                    payload = {
+                        "type": "status",
+                        "step": step,
+                        "label": STEP_LABELS.get(step, step),
+                        "status": "end",
+                    }
 
-            session_id: str = result.get("chat_session_id") or body.chat_session_id
+            elif event_type == "on_chat_model_stream":
+                metadata = event.get("metadata") or {}
+                tags = metadata.get("tags") or []
+                step = tags[-1] if tags else metadata.get("langgraph_node")
+                
+                if step:
+                    chunk = event.get("data", {}).get("chunk")
+                    # Note: Ensure serialize_message_content is available here
+                    text = serialize_message_content(chunk)
+                    if text:
+                        payload = {
+                            "type": "chunk",
+                            "step": step,
+                            "label": STEP_LABELS.get(step, step),
+                            "delta": text,
+                        }
+
+            elif event_type == "on_graph_end":
+                final_state = event.get("data", {}).get("output")
+
+            # --- The Critical Change: Yield Immediately ---
+            if payload:
+                yield f"data: {json.dumps(payload)}\n\n"
+                # Optional: forceful context switch to ensure flush (usually not needed but helps debug)
+                # await asyncio.sleep(0) 
+
+        # --- Handle Final Result ---
+        if final_state is None:
+             # It's possible on_graph_end didn't trigger if an error occurred earlier,
+             # but astream_events usually raises the exception.
+             pass 
+        else:
+            session_id = final_state.get("chat_session_id") or body.chat_session_id
             summary = {
                 "type": "result",
                 "chat_session_id": session_id,
-                "document": result.get("document"),
-                "diagram": result.get("diagram"),
+                "document": final_state.get("document"),
+                "diagram": final_state.get("diagram"),
                 "messages": [
-                    serialize_message_content(msg) for msg in result["messages"]
+                    serialize_message_content(msg)
+                    for msg in final_state.get("messages", [])
                 ],
             }
-            await queue.put(f"data: {json.dumps(summary)}\n\n")
-        except Exception as exc:  # noqa: BLE001 - surface agent errors to client
-            error_payload = {"type": "error", "message": str(exc)}
-            await queue.put(f"data: {json.dumps(error_payload)}\n\n")
-        finally:
-            await queue.put("data: [DONE]\n\n")
-            await queue.put(None)
+            yield f"data: {json.dumps(summary)}\n\n"
 
-    task = asyncio.create_task(invoke_agent())
-
-    try:
-        while True:
-            chunk = await queue.get()
-            if chunk is None:
-                break
-            yield chunk
+    except Exception as exc:
+        error_payload = {"type": "error", "message": str(exc)}
+        yield f"data: {json.dumps(error_payload)}\n\n"
+    
     finally:
-        if not task.done():
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        yield "data: [DONE]\n\n"
 
 
 @app.post("/chat")

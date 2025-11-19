@@ -14,31 +14,12 @@ from nodes import (
 )
 from context import Context
 
+
 def wrap_node(fn, step_key: str):
     async def wrapped(ctx: Context):
-        handler = ctx.get("stream_handler")
-        label = STEP_LABELS.get(step_key, step_key)
-
-        if handler:
-            await handler({
-                "type": "status",
-                "step": step_key,
-                "label": label,
-                "status": "start",
-            })
-
         result = fn(ctx)
         if inspect.isawaitable(result):
             result = await result
-
-        if handler:
-            await handler({
-                "type": "status",
-                "step": step_key,
-                "label": label,
-                "status": "end",
-            })
-
         return result
 
     return wrapped
