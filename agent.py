@@ -1,3 +1,5 @@
+import inspect
+
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage
 from nodes import (
@@ -8,25 +10,39 @@ from nodes import (
     processIterationNode,
     docIterationNode,
     toolNode,
+    STEP_LABELS,
 )
 from context import Context
 
 
-def build_agent():
-    """
-    Build and compile the LangGraph agent used by the FastAPI server.
+def wrap_node(fn, step_key: str):
+    async def wrapped(ctx: Context):
+        result = fn(ctx)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
-    Returns:
-        The compiled LangGraph workflow ready to be invoked.
-    """
+    return wrapped
+
+
+
+def build_agent():
     graph = StateGraph(Context)
-    graph.add_node("intentParser", intentParserNode)
-    graph.add_node("generateProcessDiagram", generateProcessDiagramNode)
-    graph.add_node("generateDocument", generateDocumentNode)
-    graph.add_node("validation", validationNode)
-    graph.add_node("processIteration", processIterationNode)
-    graph.add_node("docIteration", docIterationNode)
-    graph.add_node("tools", toolNode)
+
+    graph.add_node("intentParser", wrap_node(intentParserNode, "intentParser"))
+    graph.add_node(
+        "generateProcessDiagram",
+        wrap_node(generateProcessDiagramNode, "generateProcessDiagram"),
+    )
+    graph.add_node(
+        "generateDocument", wrap_node(generateDocumentNode, "generateDocument")
+    )
+    graph.add_node("validation", wrap_node(validationNode, "validation"))
+    graph.add_node(
+        "processIteration", wrap_node(processIterationNode, "processIteration")
+    )
+    graph.add_node("docIteration", wrap_node(docIterationNode, "docIteration"))
+    graph.add_node("tools", wrap_node(toolNode, "tools"))
 
     graph.add_edge(START, "intentParser")
     graph.add_edge("intentParser", "generateProcessDiagram")
@@ -39,10 +55,7 @@ def build_agent():
     graph.add_conditional_edges(
         "validation",
         should_iterate,
-        {
-            "tools": "tools",
-            "docIteration": "docIteration",
-        },
+        {"tools": "tools", "docIteration": "docIteration"},
     )
 
     graph.add_edge("docIteration", "processIteration")
