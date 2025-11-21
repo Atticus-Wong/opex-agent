@@ -229,8 +229,6 @@ async def validationNode(cxt: Context):
 
     # --- 4. Post-process verdict ---
     is_pass = "pass" in review.lower()
-    logger.info(review.lower())
-    logger.info(f"value of is_pass: {is_pass}")
 
     # --- 5. Store results in context ---
     cxt["is_satisfied"] = is_pass
@@ -361,38 +359,26 @@ async def toolNode(cxt: Context):
     if not document or not diagram:
         raise ValueError("Missing document or diagram for toolNode execution.")
     
-    system_message = f"""
-    You are a process automation agent responsible for delivering final workflow outputs.
-    You have access to a Gmail-sending tool (GMAIL_SEND_EMAIL) that can send emails with
-    subject and body content.
+    summary_prompt = f"""
+        You are a process automation agent delivering final outputs.
+        Create a concise response for the user that:
+        - Summarizes the validated workflow in clear bullet points.
+        - Embeds the Mermaid diagram code block.
+        - Includes a short next-steps section with 2–3 actionable items.
+        - Stays under 200 words overall.
+        - Do NOT call any tools; only draft the response text.
 
-    Your task:
-    1. Compose a professional summary email to the operations team at **opexteam.codelab@gmail.com**.
-    2. Include the **validated document** and the **Mermaid diagram** within the email body.
-    3. Use the Gmail tool to send the message.
-    4. output the message you composed and send to the gmail.
+        Reference Document:
+        {document}
 
-    Document:
-    {document}
+        Mermaid Diagram:
+        ```mermaid
+        {diagram}
+        ```
 
-    Mermaid Diagram:
-    ```mermaid
-    {diagram}
-    ```
+        Return the final response ready to send to the user.
     """
-    
-    # Create the react agent
-    agent_executor = create_agent(llm, tools)
-    
-    # Run with the system message
-    result = agent_executor.invoke({
-        "messages": [HumanMessage(content=system_message)]
-    })
-    
-    # Get the final AI message
-    final_message = result["messages"][-1]
-    final_output = final_message.content if hasattr(final_message, 'content') else str(final_message)
 
-    # Save to context
-    cxt["messages"].append(AIMessage(content=final_output))
+    final_summary = await _invoke_llm(summary_prompt, "tools")
+    cxt["messages"].append(AIMessage(content=final_summary))
     return cxt

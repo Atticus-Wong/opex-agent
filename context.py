@@ -13,7 +13,7 @@ COMPOSIO_USER_ID = os.environ["COMPOSIO_USER_ID"]
 tools = composio.tools.get(user_id=COMPOSIO_USER_ID, tools=["GMAIL_FETCH_EMAILS", "GMAIL_SEND_EMAIL"])
 # tools = composio.tools.get(user_id=COMPOSIO_USER_ID, toolkits=["NOTION"], tools=["GMAIL_SEND_EMAIL"])
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+llm = ChatGoogleGenerativeAI(model="gemini-3-pro-preview")
 # llm = ChatOpenAI(model="gpt-5-nano")
 
 logger = logging.getLogger("opex-agent")

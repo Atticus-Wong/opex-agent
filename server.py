@@ -2,7 +2,7 @@ import asyncio
 import json
 from contextlib import suppress
 from typing import Any
-
+from context import logger
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -86,69 +86,81 @@ async def run_workflow(body: RunRequest):
     )
 
 async def _sse_event_stream(body: RunRequest):
+    logger.info("_sse_event_stream entered")
+    summary_payload = None
+    final_state = None
+    current_step = None
+    
     try:
-        final_state = None
-        
-        # We iterate directly over the agent's stream
+        # Use astream_events with version v2 for better event handling
         async for event in agent.astream_events(
             {
                 "messages": [HumanMessage(content=body.prompt)],
                 "chat_session_id": body.chat_session_id,
             },
-            stream_mode="messages",
-            version="v1",
+            version="v2",
         ):
             event_type = event.get("event")
             payload = None
 
-            # --- Logic to format your events ---
-            if event_type == "on_node_start":
-                step = event.get("name")
-                if step:
+            # --- Node Start Events ---
+            if event_type == "on_chain_start":
+                name = event.get("name")
+                # Filter for actual node names (not the overall graph)
+                if name and name in STEP_LABELS:
+                    current_step = name
                     payload = {
                         "type": "status",
-                        "step": step,
-                        "label": STEP_LABELS.get(step, step),
+                        "step": name,
+                        "label": STEP_LABELS.get(name, name),
                         "status": "start",
                     }
 
-            elif event_type == "on_node_end":
-                step = event.get("name")
-                if step:
+            # --- Node End Events ---
+            elif event_type == "on_chain_end":
+                name = event.get("name")
+                if name and name in STEP_LABELS:
                     payload = {
                         "type": "status",
-                        "step": step,
-                        "label": STEP_LABELS.get(step, step),
+                        "step": name,
+                        "label": STEP_LABELS.get(name, name),
                         "status": "end",
                     }
+                    # Capture output data if this is a node
+                    output = event.get("data", {}).get("output")
+                    if output and isinstance(output, dict):
+                        final_state = output
 
+            # --- LLM Token Streaming ---
             elif event_type == "on_chat_model_stream":
-                metadata = event.get("metadata") or {}
-                tags = metadata.get("tags") or []
-                step = tags[-1] if tags else metadata.get("langgraph_node")
-                
-                if step:
-                    chunk = event.get("data", {}).get("chunk")
-                    # Note: Ensure serialize_message_content is available here
-                    text = serialize_message_content(chunk)
-                    if text:
-                        payload = {
-                            "type": "chunk",
-                            "step": step,
-                            "label": STEP_LABELS.get(step, step),
-                            "delta": text,
-                        }
+                chunk = event.get("data", {}).get("chunk")
+                text = serialize_message_content(chunk)
+                if text and current_step:
+                    payload = {
+                        "type": "chunk",
+                        "step": current_step,
+                        "label": STEP_LABELS.get(current_step, current_step),
+                        "delta": text,
+                    }
 
-            elif event_type == "on_graph_end":
-                final_state = event.get("data", {}).get("output")
-
-            # --- The Critical Change: Yield Immediately ---
+            # --- Send event immediately ---
             if payload:
                 yield f"data: {json.dumps(payload)}\n\n"
-                # Optional: forceful context switch to ensure flush (usually not needed but helps debug)
-                # await asyncio.sleep(0) 
+                await asyncio.sleep(0)  # Force context switch for flushing
+
         # --- Handle Final Result ---
+        # If we didn't capture final_state from events, invoke once to get it
+        if not final_state:
+            logger.info("No final_state captured, invoking agent")
+            final_state = await agent.ainvoke(
+                {
+                    "messages": [HumanMessage(content=body.prompt)],
+                    "chat_session_id": body.chat_session_id,
+                }
+            )
+
         if final_state:
+            logger.info("Preparing summary payload")
             session_id = final_state.get("chat_session_id") or body.chat_session_id
             messages_list = final_state.get("messages", [])
             
@@ -157,27 +169,27 @@ async def _sse_event_stream(body: RunRequest):
             if messages_list:
                 assistant_message = serialize_message_content(messages_list[-1])
 
-            summary = {
-                "type": "response",  # IMPORTANT CHANGE
+            summary_payload = {
+                "type": "response",
                 "chat_session_id": session_id,
                 "assistant_message": assistant_message,
-                "document": final_state.get("document"),  # for DB metadata
-                "diagram": final_state.get("diagram"),    # for DB metadata
+                "document": final_state.get("document"),
+                "diagram": final_state.get("diagram"),
                 "messages": [
                     serialize_message_content(msg)
                     for msg in messages_list
                 ],
             }
 
-            # Send final SSE event
-            yield f"data: {json.dumps(summary)}\n\n"
-
-
     except Exception as exc:
+        logger.error(f"Error in stream: {exc}")
         error_payload = {"type": "error", "message": str(exc)}
         yield f"data: {json.dumps(error_payload)}\n\n"
     
     finally:
+        if summary_payload:
+            logger.info("Sending summary payload")
+            yield f"data: {json.dumps(summary_payload)}\n\n"
         yield "data: [DONE]\n\n"
 
 
