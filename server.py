@@ -147,25 +147,31 @@ async def _sse_event_stream(body: RunRequest):
                 yield f"data: {json.dumps(payload)}\n\n"
                 # Optional: forceful context switch to ensure flush (usually not needed but helps debug)
                 # await asyncio.sleep(0) 
-
         # --- Handle Final Result ---
-        if final_state is None:
-             # It's possible on_graph_end didn't trigger if an error occurred earlier,
-             # but astream_events usually raises the exception.
-             pass 
-        else:
+        if final_state:
             session_id = final_state.get("chat_session_id") or body.chat_session_id
+            messages_list = final_state.get("messages", [])
+            
+            # Get final assistant message as plain text
+            assistant_message = ""
+            if messages_list:
+                assistant_message = serialize_message_content(messages_list[-1])
+
             summary = {
-                "type": "result",
+                "type": "response",  # IMPORTANT CHANGE
                 "chat_session_id": session_id,
-                "document": final_state.get("document"),
-                "diagram": final_state.get("diagram"),
+                "assistant_message": assistant_message,
+                "document": final_state.get("document"),  # for DB metadata
+                "diagram": final_state.get("diagram"),    # for DB metadata
                 "messages": [
                     serialize_message_content(msg)
-                    for msg in final_state.get("messages", [])
+                    for msg in messages_list
                 ],
             }
+
+            # Send final SSE event
             yield f"data: {json.dumps(summary)}\n\n"
+
 
     except Exception as exc:
         error_payload = {"type": "error", "message": str(exc)}
