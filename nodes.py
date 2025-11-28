@@ -125,7 +125,8 @@ async def generateProcessDiagramNode(cxt: Context):
             Implementation --> Review
             Review --> End
         ```
-
+        DO NOT USE the \ character in your response. This will break the mermaid parser
+        and cause malformed output. 
         ---
         Workflow description:
         {optimized_message}
