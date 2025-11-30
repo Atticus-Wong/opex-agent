@@ -1,7 +1,7 @@
 import asyncio
 import json
 from contextlib import suppress
-from typing import Any
+from typing import Any, List
 from context import logger
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from agent import build_agent
 from nodes import STEP_LABELS
+from supabase_client import get_latest_diagram_and_document
 
 app = FastAPI()
 
@@ -64,12 +65,73 @@ class RunResponse(BaseModel):
     messages: list[str]
 
 
+
+
+def build_full_prompt(chat_session_id: str, user_prompt: str) -> str:
+    """
+    Build a prompt that includes the latest diagram + document from Supabase (if any),
+    so the agent can EDIT existing state instead of starting from scratch.
+    """
+    diagram, document = get_latest_diagram_and_document(chat_session_id)
+
+    context_parts: List[str] = []
+
+    if diagram:
+        context_parts.append(
+            "=== CURRENT WORKFLOW DIAGRAM ===\n"
+            "This diagram describes the REAL business process (e.g., employee onboarding), "
+            "not a process about updating documents.\n\n"
+        )
+        context_parts.append(diagram)
+        context_parts.append("\n\n")
+
+    if document:
+        context_parts.append(
+            "=== CURRENT SOP DOCUMENT ===\n"
+            "This SOP describes the SAME underlying business process as the diagram above.\n\n"
+        )
+        context_parts.append(document)
+        context_parts.append("\n\n")
+
+    # EDIT MODE: there is existing diagram/doc
+    if context_parts:
+        return (
+            "You are an editor of an EXISTING business process.\n\n"
+            "The diagram and SOP below describe the TARGET process itself "
+            "(for example, an onboarding workflow). The user will now request changes.\n\n"
+            "Your job:\n"
+            "- Apply the requested changes DIRECTLY to that underlying business process.\n"
+            "- Keep the subject of the process the SAME (e.g., still 'Opex AI Employee Onboarding').\n"
+            "- DO NOT design a new workflow about 'asset updates', 'modifying diagrams', "
+            "  'consistency checks', or any meta-process about updating documentation.\n"
+            "- DO NOT describe a process whose purpose is to update or validate the diagram/SOP.\n"
+            "- Instead, output the UPDATED version of the onboarding (or other) process itself.\n\n"
+            "You may change names, steps, branches, or descriptions ONLY as needed to satisfy the "
+            "user request. All other parts should stay as close as possible to the current version.\n\n"
+            + "".join(context_parts)
+            + "=== USER REQUEST ===\n"
+            f"{user_prompt}\n\n"
+            "Respond as if you are the same agent that originally produced the workflow, now modifying it.\n"
+        )
+    # CREATE MODE: no existing assets
+    else:
+        return (
+            "You are designing a NEW business process from scratch.\n\n"
+            "Create a clear, well-structured workflow DIAGRAM and SOP DOCUMENT that satisfy the request below.\n"
+            "You are NOT describing 'how to update documents'; you are describing the actual business process.\n\n"
+            "USER REQUEST:\n"
+            f"{user_prompt}\n"
+        )
+
+
+
 @app.post("/run", response_model=RunResponse)
 async def run_workflow(body: RunRequest):
+    full_prompt = build_full_prompt(body.chat_session_id, body.prompt)
     try:
         result = await agent.ainvoke(
             {
-                "messages": [HumanMessage(content=body.prompt)],
+                "messages": [HumanMessage(content=full_prompt)],
                 "chat_session_id": body.chat_session_id,
             }
         )
@@ -91,11 +153,12 @@ async def _sse_event_stream(body: RunRequest):
     final_state = None
     current_step = None
     
+    full_prompt = build_full_prompt(body.chat_session_id, body.prompt)
     try:
         # Use astream_events with version v2 for better event handling
         async for event in agent.astream_events(
             {
-                "messages": [HumanMessage(content=body.prompt)],
+                "messages": [HumanMessage(content=full_prompt)],
                 "chat_session_id": body.chat_session_id,
             },
             version="v2",
@@ -154,7 +217,7 @@ async def _sse_event_stream(body: RunRequest):
             logger.info("No final_state captured, invoking agent")
             final_state = await agent.ainvoke(
                 {
-                    "messages": [HumanMessage(content=body.prompt)],
+                    "messages": [HumanMessage(content=full_prompt)],
                     "chat_session_id": body.chat_session_id,
                 }
             )
